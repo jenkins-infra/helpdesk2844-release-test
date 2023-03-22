@@ -1,0 +1,359 @@
+pipeline {
+  agent {
+    kubernetes {
+      yamlFile 'PodTemplates.d/package-linux.yaml'
+      workingDir '/home/jenkins/agent'
+      retries 2 // Retry in case of agent error caused by controller restart or pod deletion for instance
+    }
+  }
+
+  parameters {
+    choice(
+      choices: [
+        'weekly',
+        'stable',
+        'stable-rc',
+        'security'
+      ],
+      description: 'Define which Jenkins Release we are packaging for. https://github.com/jenkins-infra/release/tree/master/profile.d',
+      name: 'RELEASE_PROFILE'
+    )
+    string(
+      defaultValue: '',
+      description: 'Define which Jenkins Version to package',
+      name: 'JENKINS_VERSION',
+      trim: false
+    )
+    string(
+      defaultValue: '',
+      description: 'Define staging git branch uses for promotion',
+      name: 'RELEASE_GIT_BRANCH',
+      trim: false
+    )
+    string(
+      defaultValue: '',
+      description: 'Define which maven repository to use for packaging and promotion',
+      name: 'MAVEN_REPOSITORY_NAME',
+      trim: false
+    )
+    string(
+      defaultValue: '',
+      description: 'Define which maven repository to promote to if MAVEN_STAGING_REPOSITORY_PROMOTION_ENABLED set to true',
+      name: 'MAVEN_REPOSITORY_PRODUCTION_NAME',
+      trim: false
+    )
+    booleanParam(
+      defaultValue: false,
+      description: 'Enable Maven repository promotion',
+      name: 'MAVEN_STAGING_REPOSITORY_PROMOTION_ENABLED'
+    )
+    booleanParam(
+      defaultValue: false,
+      description: 'Enable Git repository promotion',
+      name: 'GIT_STAGING_REPOSITORY_PROMOTION_ENABLED'
+    )
+    booleanParam(
+      defaultValue: true,
+      description: 'Define if we wait for validation after displaying the plan or not',
+      name: 'VALIDATION_ENABLED'
+    )
+    booleanParam(
+      defaultValue: true,
+      description: 'Enable Windows Packaging',
+      name: 'WINDOWS_PACKAGING_ENABLED'
+    )
+  }
+
+  options {
+    disableConcurrentBuilds()
+    buildDiscarder logRotator(numToKeepStr: '15') // Retain only last 15 builds to reduce space requirements
+  }
+
+//  ENV JENKINS_VERSION
+//    stable: It represents the latest stable version that satifies version pattern X.Y.Z
+//    weekly: It represents the latest weekly version that satisfies version pattern X.Y
+//    <version>: where version represent any valid existing version like 2.176.2
+
+  environment {
+    AZURE_VAULT_NAME          = 'prodreleasecore'
+    AZURE_VAULT_CERT          = 'prodreleasecore'
+    AZURE_VAULT_CLIENT_ID     = credentials('azure-vault-client-id')
+    AZURE_VAULT_CLIENT_SECRET = credentials('azure-vault-client-secret')
+    AZURE_VAULT_TENANT_ID     = credentials('azure-vault-tenant-id')
+    GPG_FILE                  = 'jenkins-release.gpg'
+    GPG_PASSPHRASE            = credentials('release-gpg-passphrase')
+    PACKAGING_GIT_REPOSITORY  = 'git@github.com:jenkinsci/packaging.git'
+    PACKAGING_GIT_BRANCH      = 'master'
+    SIGN_KEYSTORE_FILENAME    = 'jenkins.pfx'
+    SIGN_STOREPASS            = credentials('signing-cert-pass')
+    WAR_FILENAME              = 'jenkins.war'
+    WAR                       = "$WORKSPACE/$WORKING_DIRECTORY/$WAR_FILENAME"
+    MAVEN_REPOSITORY_USERNAME = credentials('maven-repository-username')
+    MAVEN_REPOSITORY_PASSWORD = credentials('maven-repository-password')
+    MSI_FILENAME              = 'jenkins.msi'
+    MSI                       = "$WORKSPACE/$WORKING_DIRECTORY/$MSI_FILENAME"
+    WORKING_DIRECTORY         = "release"
+    PKCS12_FILE               = "$WORKSPACE/$WORKING_DIRECTORY/jenkins.pfx" // Created by SIGN_KEYSTORE
+    PKCS12_PASSWORD_FILE      = credentials('signing-cert-pass')
+  }
+
+  stages {
+    stage('Plan') {
+      steps {
+        sh 'utils/release.bash --showPackagingPlan'
+      }
+    }
+    stage('Validate') {
+      when {
+        environment name: 'VALIDATION_ENABLED', value: 'true'
+        beforeInput true
+      }
+
+      input {
+        message 'Are you ok to proceed?'
+      }
+
+      steps {
+        sh 'echo Validated'
+      }
+
+    }
+    stage('Get GPG key') {
+
+      steps {
+        checkout scm
+        dir (WORKING_DIRECTORY){
+          git branch: PACKAGING_GIT_BRANCH, credentialsId: 'release-key', url: PACKAGING_GIT_REPOSITORY
+        }
+
+        sh '''
+          ./utils/release.bash --getGPGKeyFromAzure
+        '''
+
+        dir (WORKING_DIRECTORY){
+          stash includes: GPG_FILE , name: 'GPG'
+        }
+
+        sh './utils/release.bash --configureGPG'
+      }
+    }
+
+    stage('Get Code Signing Certificate') {
+
+      steps {
+        sh '''
+          utils/release.bash --downloadAzureKeyvaultSecret
+          utils/release.bash --configureKeystore
+        '''
+
+        stash includes: SIGN_KEYSTORE_FILENAME, name: 'KEYSTORE'
+      }
+    }
+
+    stage('Download WAR archive to package'){
+      steps{
+        sh '''
+          ./utils/release.bash --downloadJenkins
+        '''
+        dir (WORKING_DIRECTORY){
+          stash includes: WAR_FILENAME, name: "WAR"
+          archiveArtifacts artifacts: "*.war"
+        }
+      }
+    }
+    stage('Package'){
+      failFast false
+      parallel {
+        stage('WAR') {
+          stages {
+            stage('Publish'){
+              steps {
+                sshagent(['pkgserver']) {
+                  sh '''
+                    ./utils/release.bash --packaging war.publish
+                  '''
+                }
+              }
+            }
+          }
+        }
+        stage('Debian') {
+          stages {
+            stage('Build'){
+              steps {
+                sh '''
+                  ./utils/release.bash --packaging deb
+                '''
+                dir (WORKING_DIRECTORY){
+                  archiveArtifacts artifacts: "target/debian/*.deb"
+                }
+              }
+            }
+            stage('Publish'){
+              steps {
+                sshagent(['pkgserver']) {
+                  sh '''
+                    ./utils/release.bash --packaging deb.publish
+                  '''
+                }
+              }
+            }
+          }
+        }
+        stage('Redhat') {
+          stages {
+            stage('Build'){
+              steps {
+                sh '''
+                  ./utils/release.bash --packaging rpm
+                '''
+                dir (WORKING_DIRECTORY){
+                  archiveArtifacts artifacts: "target/rpm/*.rpm"
+                }
+              }
+            }
+            stage('Publish'){
+              steps {
+                sshagent(['pkgserver']) {
+                  sh '''
+                    ./utils/release.bash --packaging rpm.publish
+                  '''
+                }
+              }
+            }
+          }
+        }
+        stage('Suse') {
+          stages {
+            stage('Build'){
+              steps {
+                sh '''
+                  ./utils/release.bash --packaging suse
+                '''
+                dir (WORKING_DIRECTORY){
+                  archiveArtifacts artifacts: "target/suse/*.rpm"
+                }
+              }
+            }
+            stage('Publish'){
+              steps {
+                sshagent(['pkgserver']) {
+                  sh '''
+                    ./utils/release.bash --packaging suse.publish
+                  '''
+                }
+              }
+            }
+          }
+        }
+        stage('Windows') {
+          when {
+            environment name: 'WINDOWS_PACKAGING_ENABLED', value: 'true'
+          }
+          stages {
+            stage('Build') {
+              // Windows requirement: Every steps need to be executed inside default jnlp
+              // as the step 'container' is known to not be working
+              agent {
+                kubernetes {
+                  yamlFile 'PodTemplates.d/package-windows.yaml'
+                }
+              }
+              steps {
+                container('dotnet') {
+                  checkout scm
+                  dir (WORKING_DIRECTORY){
+                    git branch: PACKAGING_GIT_BRANCH, credentialsId: 'release-key', url: PACKAGING_GIT_REPOSITORY
+
+                    unstash 'GPG'
+                    unstash 'WAR'
+                    unstash 'KEYSTORE'
+
+                    powershell '''
+                      Get-ChildItem env:
+                      $env:WAR=(Resolve-Path .\\jenkins.war).Path
+                      & .\\make.ps1
+                    '''
+                    // Don't archive the full path
+                    dir('msi\\build\\bin\\Release\\en-US') {
+                      archiveArtifacts '*.msi*'
+                    }
+
+                  }
+                }
+              }
+            }
+            stage('Publish'){
+              steps {
+                unarchive mapping: ['*.msi*': WORKING_DIRECTORY]
+                sshagent(['pkgserver']) {
+                  sh '''
+                    ./utils/release.bash --packaging msi.publish
+                  '''
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    stage('Promote'){
+      failFast true
+      parallel {
+        stage('Maven Repository') {
+          when {
+            environment name: 'MAVEN_STAGING_REPOSITORY_PROMOTION_ENABLED', value: 'true'
+          }
+
+          steps {
+            sshagent(['pkgserver']) {
+              sh '''
+                ./utils/release.bash --promoteStagingMavenArtifacts
+              '''
+            }
+          }
+        }
+        stage('Git Repository') {
+          when {
+            environment name: 'GIT_STAGING_REPOSITORY_PROMOTION_ENABLED', value: 'true'
+          }
+          steps {
+            sshagent(['pkgserver']) {
+              sh '''
+                ./utils/release.bash --promoteStagingGitRepository
+              '''
+            }
+          }
+        }
+      }
+    }
+    // Force mirror synchronization
+    stage('Synchronize mirror'){
+      steps{
+        sshagent(['pkgserver']) {
+          sh '''
+            ./utils/release.bash --syncMirror
+          '''
+        }
+      }
+    }
+    stage('Invalidate Fastly Cache'){
+      environment {
+        FASTLY_API_TOKEN = credentials('fastly-api-token')
+        FASTLY_SERVICE_ID = credentials('fastly_pkgserver_service_id')
+      }
+      steps{
+        sshagent(['pkgserver']) {
+          sh '''
+            ./utils/release.bash --invalidateFastlyCache
+          '''
+        }
+      }
+    }
+  }
+    post {
+      failure {
+        input '''Can I delete the pod? '''
+      }
+    }
+}
