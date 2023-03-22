@@ -1,0 +1,29 @@
+pipeline {
+  agent {
+    kubernetes {
+      yamlFile 'PodTemplates.d/package-linux.yaml'
+      workingDir '/home/jenkins/agent'
+      retries 2 // Retry in case of agent error caused by controller restart or pod deletion for instance
+    }
+  }
+
+  stages {
+    stage('Debug sleep powershell') {
+      // Windows requirement: Every steps need to be executed inside default jnlp
+      // as the step 'container' is known to not be working
+      agent {
+        kubernetes {
+          yamlFile 'PodTemplates.d/package-windows.yaml'
+        }
+      }
+      steps {
+        container('dotnet') {
+          echo "powershell sleep"
+          powershell '''
+            Start-Sleep -Seconds 600
+          '''
+        }
+      }
+    }
+  }
+}
