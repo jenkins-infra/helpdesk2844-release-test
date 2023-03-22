@@ -28,15 +28,14 @@ spec:
           mountPath: /srv/releases/jenkins
         - name: website-core-packages
           mountPath: /var/www/pkg.jenkins.io.staging/
-  affinity:
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: kubernetes.io/os
-                operator: In
-                values:
-                  - linux
+  nodeSelector:
+    kubernetes.azure.com/agentpool: releasepool
+    kubernetes.io/os: linux
+  tolerations:
+    - key: "os"
+      operator: "Equal"
+      value: "linux"
+      effect: "NoSchedule"
   volumes:
     - name: binary-core-packages
       persistentVolumeClaim:

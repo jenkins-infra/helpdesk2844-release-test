@@ -36,15 +36,9 @@ spec:
     securityContext:
       privileged: false
     tty: false
-  affinity:
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: kubernetes.io/os
-            operator: In
-            values:
-              - windows
+  nodeSelector:
+    kubernetes.azure.com/agentpool: w2019
+    kubernetes.io/os: windows
   tolerations:
     - key: "os"
       operator: "Equal"
