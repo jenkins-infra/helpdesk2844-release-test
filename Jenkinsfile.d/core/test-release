@@ -1,0 +1,24 @@
+// -*- Groovy -*-
+
+/*
+  Jenkins Plugins:
+    * Azure-Credentials
+    * SSH-agent
+    * Kubernetes
+*/
+
+pipeline {
+  agent {
+    kubernetes {
+      yamlFile 'PodTemplates.d/release-linux.yaml'
+    }
+  }
+
+  stages {
+    stage('Debug sleep') {
+      steps {
+        sh 'sleep 100000'
+      }
+    }
+  }
+}
