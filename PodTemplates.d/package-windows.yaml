@@ -44,3 +44,7 @@ spec:
       operator: "Equal"
       value: "windows"
       effect: "NoSchedule"
+    - key: "jenkins"
+      operator: "Equal"
+      value: "release.ci.jenkins.io"
+      effect: "NoSchedule"

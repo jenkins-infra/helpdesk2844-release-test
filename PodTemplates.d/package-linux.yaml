@@ -36,6 +36,10 @@ spec:
       operator: "Equal"
       value: "linux"
       effect: "NoSchedule"
+    - key: "jenkins"
+      operator: "Equal"
+      value: "release.ci.jenkins.io"
+      effect: "NoSchedule"
   volumes:
     - name: binary-core-packages
       persistentVolumeClaim:
